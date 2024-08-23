@@ -16,6 +16,7 @@ import {
   TransactionsGetRequest,
 } from "plaid";
 import { Pool } from "pg";
+import NodeCache from "node-cache";
 
 const PORT = process.env.PORT || 5000;
 
@@ -121,31 +122,32 @@ app.post("/api/set_access_token", async (req, res, next) => {
   }
 });
 
-app.get("/api/create_link_token", function (request, response, next) {
-  Promise.resolve()
-    .then(async function () {
-      const configs = {
-        user: {
-          // This should correspond to a unique id for the current user.
-          client_user_id: "user-id",
-        },
-        client_name: "Daiko",
-        products: PLAID_PRODUCTS,
-        country_codes: PLAID_COUNTRY_CODES,
-        language: "en",
-        redirect_uri: PLAID_REDIRECT_URI,
-      };
+app.get("/api/create_link_token", async function (request, response, next) {
+  try {
+    const configs = {
+      user: {
+        // This should correspond to a unique id for the current user.
+        client_user_id: "user-id",
+      },
+      client_name: "Daiko",
+      products: PLAID_PRODUCTS,
+      country_codes: PLAID_COUNTRY_CODES,
+      language: "en",
+      redirect_uri: PLAID_REDIRECT_URI,
+    };
 
-      if (PLAID_REDIRECT_URI !== "") {
-        configs.redirect_uri = PLAID_REDIRECT_URI;
-      }
-      console.log(configs);
+    if (PLAID_REDIRECT_URI !== "") {
+      configs.redirect_uri = PLAID_REDIRECT_URI;
+    }
+    console.log(configs);
 
-      const createTokenResponse = await client.linkTokenCreate(configs);
-      prettyPrintResponse(createTokenResponse);
-      response.json(createTokenResponse.data);
-    })
-    .catch(next);
+    const createTokenResponse = await client.linkTokenCreate(configs);
+    prettyPrintResponse(createTokenResponse);
+    response.json(createTokenResponse.data);
+  } catch (error) {
+    console.error(error);
+    next(error);
+  }
 });
 
 app.get("/api/auth", async (req, res, next) => {
@@ -178,19 +180,28 @@ app.get("/api/auth", async (req, res, next) => {
   }
 });
 
+const cache = new NodeCache({ stdTTL: 3600 }); // Cache for 1 hour
+
 // Retrieve Transactions for an Item
 // https://plaid.com/docs/#transactions
 app.get("/api/transactions", async (req, res, next) => {
   const { institution, start_date, end_date } = req.query;
-
+  console.log(institution, start_date, end_date);
   if (!institution || !start_date || !end_date) {
     return res
       .status(400)
       .json({ error: "Institution, start_date, and end_date are required" });
   }
 
+  const cacheKey = `transactions_${institution}_${start_date}_${end_date}`;
+
   try {
-    // Retrieve the access token from the database
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+      return res.json({ transactions: cachedData });
+    }
+
+    // If not in cache, fetch from Plaid
     const accessToken = await getAccessTokenByInstitution(
       pool,
       institution as string
@@ -228,6 +239,9 @@ app.get("/api/transactions", async (req, res, next) => {
       const paginatedResponse = await client.transactionsGet(paginatedRequest);
       transactions = transactions.concat(paginatedResponse.data.transactions);
     }
+
+    // Cache the fetched transactions
+    cache.set(cacheKey, transactions);
 
     // Return the transactions in the response
     res.json({ transactions });
